@@ -58,6 +58,7 @@ public enum SessionState
     Stopped,
     Connecting,
     Connected,
+    Reconnecting,
     Stopping,
     Failed
 }
@@ -128,6 +129,15 @@ public sealed class SessionView
     public string? SessionId { get; set; }
     public string? LastError { get; set; }
     public int? ProcessId { get; set; }
+    public int RetryAttempt { get; set; }
+    public int MaxRetries { get; set; } = 3;
+}
+
+public sealed class ProgressUpdate
+{
+    public required string Message { get; init; }
+    public bool IsBusy { get; init; }
+    public int? Percent { get; init; }
 }
 
 public sealed class PrerequisiteStatus
