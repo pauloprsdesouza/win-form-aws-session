@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AwsSsmPortForwarder.App/AwsSsmPortForwarder.App.csproj" />
+    <Project Path="src/AwsSsmPortForwarder.Core/AwsSsmPortForwarder.Core.csproj" />
+    <Project Path="src/AwsSsmPortForwarder.Infrastructure/AwsSsmPortForwarder.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AwsSsmPortForwarder.IntegrationTests/AwsSsmPortForwarder.IntegrationTests.csproj" />
+    <Project Path="tests/AwsSsmPortForwarder.UnitTests/AwsSsmPortForwarder.UnitTests.csproj" />
+  </Folder>
+</Solution>

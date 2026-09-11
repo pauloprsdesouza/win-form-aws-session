@@ -25,3 +25,9 @@ Desktop.ini
 .env
 *.pfx
 *.snk
+
+AwsSessionLauncher.exe
+AwsSessionLauncher.zip
+*.jpeg
+*.jpg
+

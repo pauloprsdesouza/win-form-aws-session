@@ -1,54 +1,45 @@
-# AWS Session Launcher
+# AWS SSM Port Forwarding Launcher
 
-Windows desktop UI for AWS SSO login and Systems Manager port-forwarding tunnels (.NET 10 WinForms).
+Simple Windows UI for AWS Systems Manager port forwarding (.NET 10).
+
+Normal flow: **AWS folder → profile → ports → Connect**.
 
 ## Prerequisites
 
 - Windows 10/11 x64
 - [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 - [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
-- At least one AWS profile (`aws configure` / `aws configure sso`)
+- An AWS folder with `config` and/or `credentials` (default suggestion: `%USERPROFILE%\.aws`)
 
-## Build
-
-```powershell
-dotnet build .\AwsSessionLauncher.slnx -c Release
-```
-
-## Test
+## Build / test / publish
 
 ```powershell
-dotnet test .\AwsSessionLauncher.slnx -c Release
-```
+dotnet build .\AwsSsmPortForwarder.slnx -c Release
+dotnet test .\AwsSsmPortForwarder.slnx -c Release
 
-## Publish (self-contained single EXE)
-
-```powershell
-dotnet publish .\src\AwsSessionLauncher.WinForms\AwsSessionLauncher.WinForms.csproj `
-  -c Release `
-  -r win-x64 `
+dotnet publish .\src\AwsSsmPortForwarder.App\AwsSsmPortForwarder.App.csproj `
+  --configuration Release `
+  --runtime win-x64 `
   --self-contained true `
   -p:PublishSingleFile=true `
   -p:PublishReadyToRun=true
 ```
 
-Output: `src\AwsSessionLauncher.WinForms\bin\Release\net10.0-windows\win-x64\publish\AwsSessionLauncher.exe`
+Output EXE: `src\AwsSsmPortForwarder.App\bin\Release\net10.0-windows\win-x64\publish\AwsSsmPortForwarder.exe`
 
-## Manual validation checklist
+`appsettings.json` (beside the EXE) controls the bastion tag policy (`Name=bastion-host` by default) without recompilation.
 
-1. Launch the EXE — UI opens and stays responsive.
-2. Standard `~/.aws` config is detected without a folder picker.
-3. Profiles list; secrets never appear in the UI/logs.
-4. SSO profile: Sign in → browser → Validate shows account/ARN.
-5. Non-SSO profile: Validate works; Sign in stays disabled/inappropriate.
-6. Refresh targets by Name tag; multiple matches require selection; SSM status visible.
-7. Start managed-node and remote-host forwards; multiple rules concurrently.
-8. Local port conflict blocked before start.
-9. Stop one / Stop All; close app stops tunnels.
-10. Settings persist under `%LOCALAPPDATA%\AwsSessionLauncher\` (no credentials stored).
+## First run
 
-## Known limitations
+1. Confirm or browse to the AWS folder containing `config` / `credentials`.
+2. Select a profile.
+3. Sign in only if SSO approval is required.
+4. Enter ports (`6106` or `6379:16379`) and click **Connect**.
 
-- AWS CLI + Session Manager plugin remain workstation prerequisites.
-- No custom Session Manager WebSocket implementation.
-- No SSH key management, DB clients, or IAM policy provisioning.
+The app never asks for AWS access keys. Credentials stay in your AWS files; the app only passes the folder paths to child `aws.exe` processes via `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`.
+
+## Credential safety
+
+- No secret fields in the UI
+- Settings store only folder path, last profile, and last ports text under `%LOCALAPPDATA%\AwsSsmPortForwarder\`
+- Logs redact secret-like values
