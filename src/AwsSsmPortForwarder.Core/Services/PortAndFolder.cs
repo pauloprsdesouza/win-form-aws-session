@@ -1,64 +1,124 @@
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using AwsSsmPortForwarder.Core.Models;
 
 namespace AwsSsmPortForwarder.Core.Services;
 
-public sealed record PortParseResult(IReadOnlyList<PortMapping> Mappings, IReadOnlyList<string> Errors, bool RequiresConfirmation);
-
-public static class PortParser
+public static class PortForwardRuleValidator
 {
-    private static readonly Regex TokenSplit = new(@"[\s,;]+", RegexOptions.Compiled);
+    private static readonly Regex DnsName = new(
+        @"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    public static PortParseResult Parse(string? text)
+    public static RuleValidationResult Validate(PortForwardRule rule)
     {
         var errors = new List<string>();
-        var mappings = new List<PortMapping>();
-        if (string.IsNullOrWhiteSpace(text))
-            return new PortParseResult([], ["Enter at least one port."], false);
 
-        var tokens = TokenSplit.Split(text.Trim()).Where(t => t.Length > 0);
-        foreach (var token in tokens)
+        if (rule.RemotePort is null)
+            errors.Add("Remote port is required.");
+        else if (rule.RemotePort is < 1 or > 65535)
+            errors.Add("Remote port must be between 1 and 65535.");
+
+        if (rule.LocalPort is null)
+            errors.Add("Local port is required.");
+        else if (rule.LocalPort is < 1 or > 65535)
+            errors.Add("Local port must be between 1 and 65535.");
+
+        if (ContainsControlChars(rule.RemoteHost) || ContainsControlChars(rule.Label))
+            errors.Add("Fields must not contain control characters.");
+
+        if (rule.Type == PortForwardType.RemoteHost)
         {
-            var parts = token.Split(':', 2, StringSplitOptions.TrimEntries);
-            if (parts.Length is < 1 or > 2 ||
-                !int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var remote) ||
-                remote is < 1 or > 65535)
-            {
-                errors.Add($"Invalid port entry '{token}'.");
-                continue;
-            }
-
-            int local = remote;
-            if (parts.Length == 2)
-            {
-                if (!int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out local) ||
-                    local is < 1 or > 65535)
-                {
-                    errors.Add($"Invalid local port in '{token}'.");
-                    continue;
-                }
-            }
-
-            mappings.Add(new PortMapping(remote, local));
+            var hostError = ValidateHost(rule.RemoteHost);
+            if (hostError is not null)
+                errors.Add(hostError);
+        }
+        else if (!string.IsNullOrWhiteSpace(rule.RemoteHost))
+        {
+            errors.Add("Managed node rows must not include a remote host.");
         }
 
-        // Deduplicate identical mappings
-        mappings = mappings.Distinct().ToList();
+        if (errors.Count > 0)
+        {
+            var incomplete = rule.RemotePort is null || rule.LocalPort is null ||
+                             (rule.Type == PortForwardType.RemoteHost && string.IsNullOrWhiteSpace(rule.RemoteHost));
+            return new RuleValidationResult(false, incomplete ? SessionState.Incomplete : SessionState.Failed, errors);
+        }
 
-        var dupLocal = mappings.GroupBy(m => m.LocalPort).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
-        foreach (var port in dupLocal)
-            errors.Add($"Duplicate local port {port}.");
-
-        if (dupLocal.Count > 0)
-            mappings = mappings.Where(m => !dupLocal.Contains(m.LocalPort)).ToList();
-
-        var needsConfirm = mappings.Count > 20;
-        if (errors.Count > 0 && mappings.Count == 0)
-            return new PortParseResult([], errors, false);
-
-        return new PortParseResult(mappings, errors, needsConfirm);
+        return new RuleValidationResult(true, SessionState.Ready, []);
     }
+
+    public static RuleValidationResult ValidateEnabledSet(IReadOnlyList<PortForwardRule> rules)
+    {
+        var enabled = rules.Where(r => r.Enabled).ToList();
+        var allErrors = new List<string>();
+        foreach (var rule in enabled)
+        {
+            var result = Validate(rule);
+            if (!result.IsValid)
+                allErrors.AddRange(result.Errors.Select(e => $"{Display(rule)}: {e}"));
+        }
+
+        var dup = enabled
+            .Where(r => r.LocalPort is not null)
+            .GroupBy(r => r.LocalPort!.Value)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+        foreach (var port in dup)
+            allErrors.Add($"Duplicate local port {port}.");
+
+        if (allErrors.Count > 0)
+            return new RuleValidationResult(false, SessionState.Failed, allErrors);
+
+        return new RuleValidationResult(true, SessionState.Ready, []);
+    }
+
+    public static bool RequiresConfirmation(IEnumerable<PortForwardRule> rules) =>
+        rules.Count(r => r.Enabled) > 20;
+
+    public static string? ValidateHost(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+            return "Enter a hostname or IP without protocol, path, or port.";
+
+        host = host.Trim();
+        if (host.Length > 253)
+            return "Hostname must be at most 253 characters.";
+
+        if (ContainsControlChars(host))
+            return "Enter a hostname or IP without protocol, path, or port.";
+
+        if (host.Contains("://", StringComparison.Ordinal) ||
+            host.Contains('/') || host.Contains('?') || host.Contains('#') ||
+            host.Contains('@') || host.Contains('\\'))
+            return "Enter a hostname or IP without protocol, path, or port.";
+
+        // Reject host:port (but allow IPv6 literals in brackets)
+        if (host.Contains(':') && !(host.StartsWith('[') && host.EndsWith(']')))
+        {
+            if (!IPAddress.TryParse(host, out var ip) || ip.AddressFamily != AddressFamily.InterNetworkV6)
+                return "Enter a hostname or IP without protocol, path, or port.";
+        }
+
+        if (IPAddress.TryParse(host.Trim('[', ']'), out _))
+            return null;
+
+        if (DnsName.IsMatch(host))
+            return null;
+
+        return "Enter a hostname or IP without protocol, path, or port.";
+    }
+
+    private static bool ContainsControlChars(string? value) =>
+        !string.IsNullOrEmpty(value) && value.Any(ch => char.IsControl(ch));
+
+    private static string Display(PortForwardRule rule) =>
+        rule.Label ?? (rule.Type == PortForwardType.RemoteHost
+            ? (rule.RemoteHost ?? "Remote host")
+            : $"Managed :{rule.RemotePort?.ToString(CultureInfo.InvariantCulture) ?? "?"}");
 }
 
 public interface ILocalPortChecker
@@ -77,7 +137,7 @@ public sealed class LocalPortChecker : ILocalPortChecker
 
         try
         {
-            using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+            using var listener = new TcpListener(IPAddress.Loopback, port);
             listener.Start();
             listener.Stop();
             return true;
@@ -97,10 +157,10 @@ public sealed class LocalPortChecker : ILocalPortChecker
             var listeners = System.Net.NetworkInformation.IPGlobalProperties
                 .GetIPGlobalProperties().GetActiveTcpListeners();
             if (listeners.Any(ep => ep.Port == port &&
-                (ep.Address.Equals(System.Net.IPAddress.Loopback) ||
-                 ep.Address.Equals(System.Net.IPAddress.Any) ||
-                 ep.Address.Equals(System.Net.IPAddress.IPv6Loopback) ||
-                 ep.Address.Equals(System.Net.IPAddress.IPv6Any))))
+                (ep.Address.Equals(IPAddress.Loopback) ||
+                 ep.Address.Equals(IPAddress.Any) ||
+                 ep.Address.Equals(IPAddress.IPv6Loopback) ||
+                 ep.Address.Equals(IPAddress.IPv6Any))))
             {
                 return true;
             }
@@ -153,11 +213,14 @@ public static class AwsFolderFactory
 
 public static class SsoProfileClassifier
 {
-    /// <summary>Classifies SSO without loading secret values.</summary>
     public static bool IsSsoProfile(string? configContent, string profileName)
     {
         if (string.IsNullOrWhiteSpace(configContent)) return false;
-        var sectionNames = new[] { $"[profile {profileName}]", profileName.Equals("default", StringComparison.OrdinalIgnoreCase) ? "[default]" : null }
+        var sectionNames = new[]
+            {
+                $"[profile {profileName}]",
+                profileName.Equals("default", StringComparison.OrdinalIgnoreCase) ? "[default]" : null
+            }
             .Where(s => s is not null)
             .Cast<string>()
             .ToArray();
@@ -182,4 +245,32 @@ public static class SsoProfileClassifier
         }
         return false;
     }
+}
+
+public static class ConnectionSettingsMapper
+{
+    public static PortForwardRule ToRule(SavedConnection saved)
+    {
+        var type = Enum.TryParse<PortForwardType>(saved.Type, true, out var parsed)
+            ? parsed
+            : PortForwardType.ManagedNode;
+        return new PortForwardRule(
+            Guid.NewGuid(),
+            saved.Enabled,
+            type,
+            type == PortForwardType.RemoteHost ? saved.RemoteHost : null,
+            saved.RemotePort,
+            saved.LocalPort,
+            saved.Label);
+    }
+
+    public static SavedConnection ToSaved(PortForwardRule rule) => new()
+    {
+        Type = rule.Type.ToString(),
+        RemoteHost = rule.Type == PortForwardType.RemoteHost ? rule.RemoteHost : null,
+        RemotePort = rule.RemotePort,
+        LocalPort = rule.LocalPort,
+        Enabled = rule.Enabled,
+        Label = rule.Label
+    };
 }

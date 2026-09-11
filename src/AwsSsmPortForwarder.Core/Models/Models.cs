@@ -9,7 +9,20 @@ public sealed record AwsFolderContext(string FolderPath, string? ConfigFilePath,
 
 public sealed record AwsContext(AwsFolderContext Folder, string ProfileName, string? Region);
 
-public sealed record PortMapping(int RemotePort, int LocalPort);
+public enum PortForwardType
+{
+    ManagedNode,
+    RemoteHost
+}
+
+public sealed record PortForwardRule(
+    Guid Id,
+    bool Enabled,
+    PortForwardType Type,
+    string? RemoteHost,
+    int? RemotePort,
+    int? LocalPort,
+    string? Label = null);
 
 public sealed record AwsIdentity(string AccountId, string Arn, string UserId);
 
@@ -21,7 +34,7 @@ public sealed record AwsTarget(
     string Ec2State,
     string SsmPingStatus);
 
-public sealed record StartPortForwardRequest(AwsContext Context, string InstanceId, PortMapping Mapping);
+public sealed record StartPortForwardRequest(AwsContext Context, string InstanceId, PortForwardRule Rule);
 
 public sealed record TargetOptions(string TagKey, string TagValue, bool RequireRunning, bool RequireSsmOnline);
 
@@ -55,11 +68,13 @@ public enum AppReadyState
 
 public enum SessionState
 {
-    Stopped,
+    Incomplete,
+    Ready,
     Connecting,
     Connected,
     Reconnecting,
     Stopping,
+    Stopped,
     Failed
 }
 
@@ -77,6 +92,9 @@ public enum ErrorKind
     NoBastion,
     MultipleBastions,
     SsmDenied,
+    RemoteHostInvalid,
+    RemoteHostUnreachable,
+    SsmAgentIncompatible,
     LocalPortOccupied,
     SessionExited,
     Unknown
@@ -99,12 +117,23 @@ public sealed class AppException : Exception
     }
 }
 
+public sealed class SavedConnection
+{
+    public string Type { get; set; } = nameof(PortForwardType.ManagedNode);
+    public string? RemoteHost { get; set; }
+    public int? RemotePort { get; set; }
+    public int? LocalPort { get; set; }
+    public bool Enabled { get; set; } = true;
+    public string? Label { get; set; }
+}
+
 public sealed class UserSettings
 {
     public int SchemaVersion { get; set; } = 1;
     public string? LastAwsFolder { get; set; }
     public string? LastProfile { get; set; }
-    public string? LastPortsText { get; set; }
+    public bool RememberConnections { get; set; }
+    public List<SavedConnection> Connections { get; set; } = [];
 }
 
 public sealed class AppTargetConfig
@@ -124,8 +153,8 @@ public sealed class AppConfigRoot
 
 public sealed class SessionView
 {
-    public required PortMapping Mapping { get; init; }
-    public SessionState State { get; set; } = SessionState.Stopped;
+    public required PortForwardRule Rule { get; init; }
+    public SessionState State { get; set; } = SessionState.Incomplete;
     public string? SessionId { get; set; }
     public string? LastError { get; set; }
     public int? ProcessId { get; set; }
@@ -148,3 +177,5 @@ public sealed class PrerequisiteStatus
     public bool SessionManagerReady { get; init; }
     public string SessionManagerVersion { get; init; } = "not found";
 }
+
+public sealed record RuleValidationResult(bool IsValid, SessionState Status, IReadOnlyList<string> Errors);

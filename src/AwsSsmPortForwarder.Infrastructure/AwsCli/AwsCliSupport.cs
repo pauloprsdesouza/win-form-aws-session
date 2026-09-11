@@ -51,11 +51,8 @@ public static class AwsCliArgumentFactory
 
     public static IReadOnlyList<string> StartPortForward(StartPortForwardRequest request)
     {
-        var parameters = JsonSerializer.Serialize(new
-        {
-            portNumber = new[] { request.Mapping.RemotePort.ToString(CultureInfo.InvariantCulture) },
-            localPortNumber = new[] { request.Mapping.LocalPort.ToString(CultureInfo.InvariantCulture) }
-        });
+        var document = SsmDocumentNameResolver.Resolve(request.Rule.Type);
+        var parameters = SsmParameterSerializer.Serialize(request.Rule);
 
         return
         [
@@ -63,7 +60,7 @@ public static class AwsCliArgumentFactory
             "--profile", request.Context.ProfileName,
             "--region", request.Context.Region!,
             "--target", request.InstanceId,
-            "--document-name", "AWS-StartPortForwardingSession",
+            "--document-name", document,
             "--parameters", parameters,
             "--no-cli-pager"
         ];
@@ -110,6 +107,19 @@ public static class AwsCliErrorMapper
 
         if (lower.Contains("address already in use") || lower.Contains("port is already") || lower.Contains("bind"))
             return new AppException(ErrorKind.LocalPortOccupied, "Local port is already in use.", "Change / Retry", text);
+
+        if (lower.Contains("targetnotconnected") || lower.Contains("unsupported document") ||
+            lower.Contains("document does not exist") || lower.Contains("ssm agent"))
+            return new AppException(ErrorKind.SsmAgentIncompatible,
+                "The bastion's SSM Agent does not support this forwarding type.",
+                "Ask the AWS administrator to update the agent", text);
+
+        if (lower.Contains("could not resolve") || lower.Contains("no such host") ||
+            lower.Contains("connection timed out") || lower.Contains("connection refused") ||
+            lower.Contains("name or service not known"))
+            return new AppException(ErrorKind.RemoteHostUnreachable,
+                "The bastion could not resolve or reach the remote host and port.",
+                "Verify DNS, routes, security groups, NACLs, and service availability", text);
 
         return new AppException(ErrorKind.Unknown,
             $"AWS CLI {operation} failed (exit {exitCode}).",

@@ -134,7 +134,8 @@ public sealed class AwsCliClient(IProcessRunner runner, ILogger<AwsCliClient> lo
         var aws = RequireAws();
         var env = AwsFolderFactory.BuildChildEnvironment(request.Context.Folder);
         var args = AwsCliArgumentFactory.StartPortForward(request);
-        logger.LogInformation("Starting port forward remote={Remote} local={Local}", request.Mapping.RemotePort, request.Mapping.LocalPort);
+        logger.LogInformation("Starting port forward type={Type} remote={Remote} local={Local}",
+            request.Rule.Type, request.Rule.RemotePort, request.Rule.LocalPort);
         return runner.StartLongRunningAsync(aws, args, env, ct);
     }
 

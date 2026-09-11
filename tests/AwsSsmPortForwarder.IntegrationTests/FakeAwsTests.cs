@@ -123,10 +123,11 @@ public class FakeAwsCliIntegrationTests
     }
 
     [Fact]
-    public void Production_defaults_do_not_hardcode_example_port()
+    public void Production_defaults_do_not_hardcode_example_port_or_host()
     {
         var settings = new UserSettings();
-        settings.LastPortsText.Should().BeNull();
+        settings.RememberConnections.Should().BeFalse();
+        settings.Connections.Should().BeEmpty();
         var config = new AppConfigRoot();
         config.AwsTarget.TagValue.Should().Be("bastion-host");
     }

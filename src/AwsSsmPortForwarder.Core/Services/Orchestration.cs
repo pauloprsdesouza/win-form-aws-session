@@ -26,10 +26,7 @@ public sealed class TargetResolver(IAwsCliClient aws, ILogger<TargetResolver> lo
         {
             targets = await aws.DescribeTargetsAsync(ctx, options, ct).ConfigureAwait(false);
         }
-        catch (AppException)
-        {
-            throw;
-        }
+        catch (AppException) { throw; }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "EC2 discovery failed");
@@ -92,7 +89,7 @@ public sealed class ConnectionOrchestrator
     private readonly IAppConfigStore _config;
     private readonly ILogger<ConnectionOrchestrator> _logger;
     private readonly SemaphoreSlim _connectGate = new(1, 1);
-    private readonly Dictionary<int, LiveSession> _sessions = new();
+    private readonly Dictionary<Guid, LiveSession> _sessions = new();
     private readonly object _gate = new();
 
     public ConnectionOrchestrator(
@@ -120,6 +117,12 @@ public sealed class ConnectionOrchestrator
             lock (_gate)
                 return _sessions.Values.Select(s => CloneView(s.View)).ToList();
         }
+    }
+
+    public SessionView? GetSession(Guid ruleId)
+    {
+        lock (_gate)
+            return _sessions.TryGetValue(ruleId, out var live) ? CloneView(live.View) : null;
     }
 
     public async Task<(AwsIdentity? Identity, bool SignInRequired, bool IsSso, string? Message)> ValidateAuthAsync(
@@ -152,31 +155,34 @@ public sealed class ConnectionOrchestrator
     public async Task ConnectAsync(
         AwsContext context,
         string instanceId,
-        IReadOnlyList<PortMapping> mappings,
+        IReadOnlyList<PortForwardRule> rules,
         CancellationToken ct)
     {
         await _connectGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            foreach (var mapping in mappings)
+            var enabled = rules.Where(r => r.Enabled).ToList();
+            var validation = PortForwardRuleValidator.ValidateEnabledSet(enabled);
+            if (!validation.IsValid)
+                throw new AppException(ErrorKind.Unknown, "One or more connections are invalid.",
+                    "Fix the highlighted rows.", string.Join(Environment.NewLine, validation.Errors));
+
+            foreach (var rule in enabled)
             {
-                if (!_ports.IsAvailable(mapping.LocalPort))
+                if (!_ports.IsAvailable(rule.LocalPort!.Value))
                     throw new AppException(ErrorKind.LocalPortOccupied,
-                        $"Local port {mapping.LocalPort} is already in use.",
+                        $"Local port {rule.LocalPort} is already in use.",
                         "Change / Retry");
             }
 
-            RaiseProgress($"Starting {mappings.Count} tunnel(s)…", true, 0);
+            RaiseProgress($"Starting {enabled.Count} tunnel(s)…", true, 0);
             using var limiter = new SemaphoreSlim(3);
             var completed = 0;
-            var total = mappings.Count;
-            var tasks = mappings.Select(async mapping =>
+            var total = enabled.Count;
+            var tasks = enabled.Select(async rule =>
             {
                 await limiter.WaitAsync(ct).ConfigureAwait(false);
-                try
-                {
-                    await StartOneAsync(context, instanceId, mapping, isRetry: false, ct).ConfigureAwait(false);
-                }
+                try { await StartOneAsync(context, instanceId, rule, isRetry: false, ct).ConfigureAwait(false); }
                 finally
                 {
                     limiter.Release();
@@ -196,14 +202,14 @@ public sealed class ConnectionOrchestrator
     private async Task StartOneAsync(
         AwsContext context,
         string instanceId,
-        PortMapping mapping,
+        PortForwardRule rule,
         bool isRetry,
         CancellationToken ct)
     {
         LiveSession live;
         lock (_gate)
         {
-            if (_sessions.TryGetValue(mapping.LocalPort, out var existing))
+            if (_sessions.TryGetValue(rule.Id, out var existing))
             {
                 if (!isRetry && existing.View.State is SessionState.Connected or SessionState.Connecting or SessionState.Reconnecting)
                     return;
@@ -211,15 +217,21 @@ public sealed class ConnectionOrchestrator
                 live.Context = context;
                 live.InstanceId = instanceId;
                 live.StopRequested = false;
-                live.View.State = isRetry ? SessionState.Reconnecting : SessionState.Connecting;
-                live.View.LastError = null;
-                live.View.SessionId = null;
+                var attempt = live.View.RetryAttempt;
+                var max = live.View.MaxRetries;
+                live.View = new SessionView
+                {
+                    Rule = rule,
+                    State = isRetry ? SessionState.Reconnecting : SessionState.Connecting,
+                    RetryAttempt = attempt,
+                    MaxRetries = max
+                };
             }
             else
             {
                 live = new LiveSession(new SessionView
                 {
-                    Mapping = mapping,
+                    Rule = rule,
                     State = SessionState.Connecting,
                     MaxRetries = DefaultMaxRetries
                 })
@@ -227,29 +239,29 @@ public sealed class ConnectionOrchestrator
                     Context = context,
                     InstanceId = instanceId
                 };
-                _sessions[mapping.LocalPort] = live;
+                _sessions[rule.Id] = live;
             }
         }
 
         RaiseSessions();
+        var local = rule.LocalPort!.Value;
         var attemptLabel = live.View.RetryAttempt > 0
             ? $" (retry {live.View.RetryAttempt}/{live.View.MaxRetries})"
             : "";
-        RaiseStatus($"Connecting {mapping.RemotePort} → localhost:{mapping.LocalPort}{attemptLabel}");
-        RaiseProgress($"Connecting localhost:{mapping.LocalPort}{attemptLabel}", true);
+        RaiseStatus($"Connecting localhost:{local}{attemptLabel}");
+        RaiseProgress($"Connecting localhost:{local}{attemptLabel}", true);
 
-        // On retry the previous process should already be gone; port may still be freeing up.
-        var portReady = await WaitForLocalPortFreeAsync(mapping.LocalPort, TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+        var portReady = await WaitForLocalPortFreeAsync(local, TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
         if (!portReady)
         {
-            await HandleStartFailureAsync(live, $"Local port {mapping.LocalPort} is already in use.", ct).ConfigureAwait(false);
+            await HandleStartFailureAsync(live, $"Local port {local} is already in use.", ct).ConfigureAwait(false);
             return;
         }
 
         try
         {
             var process = await _aws.StartPortForwardAsync(
-                new StartPortForwardRequest(context, instanceId, mapping), ct).ConfigureAwait(false);
+                new StartPortForwardRequest(context, instanceId, rule), ct).ConfigureAwait(false);
 
             lock (_gate)
             {
@@ -270,16 +282,14 @@ public sealed class ConnectionOrchestrator
             };
             process.Exited += (_, _) =>
             {
-                // Only auto-retry unexpected drops after the tunnel was established.
                 if (live.View.State != SessionState.Connected) return;
                 OnProcessExited(live);
             };
 
-            var listening = await LocalPortChecker.WaitUntilListeningAsync(
-                mapping.LocalPort, TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
+            var listening = await LocalPortChecker.WaitUntilListeningAsync(local, TimeSpan.FromSeconds(20), ct)
+                .ConfigureAwait(false);
 
-            if (live.StopRequested)
-                return;
+            if (live.StopRequested) return;
 
             if (process.HasExited || !listening)
             {
@@ -296,47 +306,33 @@ public sealed class ConnectionOrchestrator
             {
                 live.View.State = SessionState.Connected;
                 live.View.LastError = null;
-                // Successful connect resets the consecutive failure budget for future drops.
                 live.View.RetryAttempt = 0;
             }
             RaiseSessions();
-            RaiseStatus($"Connected localhost:{mapping.LocalPort}");
-            RaiseProgress($"Connected localhost:{mapping.LocalPort}", false);
+            RaiseStatus($"Connected localhost:{local}");
+            RaiseProgress($"Connected localhost:{local}", false);
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to start mapping {Local}", mapping.LocalPort);
+            _logger.LogWarning(ex, "Failed to start rule {RuleId}", rule.Id);
             await HandleStartFailureAsync(live, Sanitize(ex.Message), ct).ConfigureAwait(false);
         }
     }
 
-    private void OnProcessExited(LiveSession live)
-    {
-        if (live.StopRequested || live.View.State is SessionState.Stopping or SessionState.Stopped)
-            return;
-
-        // Unexpected drop while connected (or mid-reconnect) → retry policy
+    private void OnProcessExited(LiveSession live) =>
         _ = Task.Run(async () =>
         {
-            try
-            {
-                await ScheduleReconnectAsync(live).ConfigureAwait(false);
-            }
+            try { await ScheduleReconnectAsync(live).ConfigureAwait(false); }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Reconnect scheduling failed for port {Port}", live.View.Mapping.LocalPort);
+                _logger.LogWarning(ex, "Reconnect scheduling failed for {RuleId}", live.View.Rule.Id);
             }
         });
-    }
 
     private async Task ScheduleReconnectAsync(LiveSession live)
     {
-        if (live.StopRequested) return;
-        if (live.Context is null || live.InstanceId is null) return;
+        if (live.StopRequested || live.Context is null || live.InstanceId is null) return;
 
         int attempt;
         lock (_gate)
@@ -351,8 +347,7 @@ public sealed class ConnectionOrchestrator
                 live.View.State = SessionState.Failed;
                 live.View.LastError = $"Connection dropped after {live.View.MaxRetries} reconnect attempts.";
                 RaiseSessions();
-                RaiseStatus($"Failed localhost:{live.View.Mapping.LocalPort} after {live.View.MaxRetries} retries");
-                RaiseProgress($"Failed localhost:{live.View.Mapping.LocalPort}", false);
+                RaiseProgress($"Failed localhost:{live.View.Rule.LocalPort}", false);
                 return;
             }
 
@@ -363,56 +358,46 @@ public sealed class ConnectionOrchestrator
         }
 
         RaiseSessions();
-        RaiseStatus($"Reconnecting localhost:{live.View.Mapping.LocalPort} ({attempt}/{live.View.MaxRetries})");
-        RaiseProgress($"Reconnecting localhost:{live.View.Mapping.LocalPort} ({attempt}/{live.View.MaxRetries})", true,
-            (int)((attempt - 1) * 100.0 / live.View.MaxRetries));
+        RaiseProgress($"Reconnecting localhost:{live.View.Rule.LocalPort} ({attempt}/{live.View.MaxRetries})", true);
 
-        var delay = TimeSpan.FromSeconds(2 * attempt);
-        try
-        {
-            await Task.Delay(delay, live.LifetimeToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
+        try { await Task.Delay(TimeSpan.FromSeconds(2 * attempt), live.LifetimeToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { return; }
 
         if (live.StopRequested) return;
-
-        await StartOneAsync(live.Context!, live.InstanceId!, live.View.Mapping, isRetry: true, live.LifetimeToken)
+        await StartOneAsync(live.Context!, live.InstanceId!, live.View.Rule, isRetry: true, live.LifetimeToken)
             .ConfigureAwait(false);
     }
 
     private async Task HandleStartFailureAsync(LiveSession live, string error, CancellationToken ct)
     {
         if (live.StopRequested) return;
-
-        // Treat start failure the same as a drop when we still have retries left.
         if (live.View.RetryAttempt < live.View.MaxRetries && live.Context is not null && live.InstanceId is not null)
         {
-            lock (_gate)
-            {
-                live.View.LastError = error;
-            }
+            lock (_gate) { live.View.LastError = error; }
             await ScheduleReconnectAsync(live).ConfigureAwait(false);
             return;
         }
-
         Fail(live, error);
     }
 
-    public async Task StopAsync(int localPort, CancellationToken ct)
+    public async Task StopAsync(Guid ruleId, CancellationToken ct)
     {
         LiveSession? live;
         lock (_gate)
         {
-            if (!_sessions.TryGetValue(localPort, out live)) return;
+            if (!_sessions.TryGetValue(ruleId, out live)) return;
             live.StopRequested = true;
             live.View.State = SessionState.Stopping;
             live.RetryCts.Cancel();
         }
         RaiseSessions();
-        RaiseProgress($"Stopping localhost:{localPort}…", true);
+        RaiseProgress("Stopping tunnel…", true);
+
+        if (!string.IsNullOrWhiteSpace(live.View.SessionId) && live.Context is not null)
+        {
+            try { await _aws.TerminateSessionAsync(live.Context, live.View.SessionId, ct).ConfigureAwait(false); }
+            catch { /* best effort */ }
+        }
 
         if (live.Process is not null)
             await live.Process.StopAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
@@ -420,43 +405,37 @@ public sealed class ConnectionOrchestrator
         lock (_gate)
         {
             live.View.State = SessionState.Stopped;
-            _sessions.Remove(localPort);
+            _sessions.Remove(ruleId);
             live.RetryCts.Dispose();
         }
         RaiseSessions();
-        RaiseProgress($"Stopped localhost:{localPort}", false);
+        RaiseProgress("Tunnel stopped", false);
     }
 
     public async Task StopAllAsync(CancellationToken ct)
     {
-        int[] ports;
-        lock (_gate) ports = _sessions.Keys.ToArray();
-        RaiseProgress(ports.Length == 0 ? "No active tunnels" : $"Stopping {ports.Length} tunnel(s)…", ports.Length > 0);
-        foreach (var p in ports)
-            await StopAsync(p, ct).ConfigureAwait(false);
+        Guid[] ids;
+        lock (_gate) ids = _sessions.Keys.ToArray();
+        RaiseProgress(ids.Length == 0 ? "No active tunnels" : $"Stopping {ids.Length} tunnel(s)…", ids.Length > 0);
+        foreach (var id in ids)
+            await StopAsync(id, ct).ConfigureAwait(false);
         RaiseProgress("All tunnels stopped", false, 100);
     }
 
     public async Task RetryFailedAsync(AwsContext context, string instanceId, CancellationToken ct)
     {
-        List<PortMapping> failed;
+        List<PortForwardRule> failed;
         lock (_gate)
         {
             failed = _sessions.Values
                 .Where(s => s.View.State == SessionState.Failed)
-                .Select(s => s.View.Mapping)
+                .Select(s => s.View.Rule)
                 .ToList();
         }
-        foreach (var mapping in failed)
-            await StopAsync(mapping.LocalPort, ct).ConfigureAwait(false);
+        foreach (var rule in failed)
+            await StopAsync(rule.Id, ct).ConfigureAwait(false);
         if (failed.Count > 0)
             await ConnectAsync(context, instanceId, failed, ct).ConfigureAwait(false);
-    }
-
-    public async Task TerminateTrackedSessionAsync(AwsContext context, string sessionId, CancellationToken ct)
-    {
-        try { await _aws.TerminateSessionAsync(context, sessionId, ct).ConfigureAwait(false); }
-        catch (Exception ex) { _logger.LogDebug(ex, "terminate-session best-effort failed"); }
     }
 
     private void Fail(LiveSession live, string error)
@@ -467,8 +446,7 @@ public sealed class ConnectionOrchestrator
             live.View.LastError = error;
         }
         RaiseSessions();
-        RaiseStatus($"Failed localhost:{live.View.Mapping.LocalPort}");
-        RaiseProgress($"Failed localhost:{live.View.Mapping.LocalPort}", false);
+        RaiseProgress($"Failed localhost:{live.View.Rule.LocalPort}", false);
     }
 
     private static async Task<bool> WaitForLocalPortFreeAsync(int port, TimeSpan timeout, CancellationToken ct)
@@ -486,7 +464,7 @@ public sealed class ConnectionOrchestrator
 
     private static SessionView CloneView(SessionView v) => new()
     {
-        Mapping = v.Mapping,
+        Rule = v.Rule,
         State = v.State,
         SessionId = v.SessionId,
         LastError = v.LastError,
@@ -516,7 +494,6 @@ public sealed class ConnectionOrchestrator
     }
 
     private void RaiseSessions() => SessionsChanged?.Invoke(this, EventArgs.Empty);
-
     private void RaiseStatus(string msg)
     {
         _logger.LogInformation("{Status}", msg);
@@ -525,18 +502,13 @@ public sealed class ConnectionOrchestrator
 
     private void RaiseProgress(string message, bool isBusy, int? percent = null)
     {
-        ProgressChanged?.Invoke(this, new ProgressUpdate
-        {
-            Message = message,
-            IsBusy = isBusy,
-            Percent = percent
-        });
+        ProgressChanged?.Invoke(this, new ProgressUpdate { Message = message, IsBusy = isBusy, Percent = percent });
         StatusChanged?.Invoke(this, message);
     }
 
     private sealed class LiveSession(SessionView view)
     {
-        public SessionView View { get; } = view;
+        public SessionView View { get; set; } = view;
         public IManagedProcess? Process { get; set; }
         public List<string> Buffer { get; } = [];
         public AwsContext? Context { get; set; }

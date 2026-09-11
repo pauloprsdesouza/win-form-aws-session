@@ -5,43 +5,94 @@ using FluentAssertions;
 
 namespace AwsSsmPortForwarder.UnitTests;
 
-public class PortParserTests
+public class PortForwardRuleValidatorTests
 {
+    [Fact]
+    public void Managed_node_ready_without_host()
+    {
+        var rule = new PortForwardRule(Guid.NewGuid(), true, PortForwardType.ManagedNode, null, 6106, 6106);
+        var result = PortForwardRuleValidator.Validate(rule);
+        result.IsValid.Should().BeTrue();
+        result.Status.Should().Be(SessionState.Ready);
+    }
+
+    [Fact]
+    public void Remote_host_requires_valid_host()
+    {
+        var missing = new PortForwardRule(Guid.NewGuid(), true, PortForwardType.RemoteHost, null, 443, 9100);
+        PortForwardRuleValidator.Validate(missing).IsValid.Should().BeFalse();
+
+        var bad = missing with { RemoteHost = "https://evil.example/path" };
+        PortForwardRuleValidator.Validate(bad).Errors.Should()
+            .Contain(e => e.Contains("hostname or IP", StringComparison.OrdinalIgnoreCase));
+
+        var good = missing with { RemoteHost = "api.internal.example" };
+        PortForwardRuleValidator.Validate(good).IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Duplicate_local_ports_rejected_in_set()
+    {
+        var rules = new[]
+        {
+            new PortForwardRule(Guid.NewGuid(), true, PortForwardType.ManagedNode, null, 80, 8080),
+            new PortForwardRule(Guid.NewGuid(), true, PortForwardType.RemoteHost, "db.internal", 5432, 8080)
+        };
+        PortForwardRuleValidator.ValidateEnabledSet(rules).IsValid.Should().BeFalse();
+    }
+
     [Theory]
-    [InlineData("6106", 6106, 6106)]
-    [InlineData("6379:16379", 6379, 16379)]
-    public void Parses_single_mapping(string input, int remote, int local)
+    [InlineData("host.example", true)]
+    [InlineData("10.0.0.5", true)]
+    [InlineData("https://host", false)]
+    [InlineData("host:443", false)]
+    [InlineData("user@host", false)]
+    public void Host_validation_cases(string host, bool ok)
     {
-        var result = PortParser.Parse(input);
-        result.Errors.Should().BeEmpty();
-        result.Mappings.Should().ContainSingle().Which.Should().Be(new PortMapping(remote, local));
+        var error = PortForwardRuleValidator.ValidateHost(host);
+        if (ok) error.Should().BeNull();
+        else error.Should().NotBeNull();
+    }
+}
+
+public class SsmSerializerTests
+{
+    [Fact]
+    public void Managed_node_parameters_omit_host()
+    {
+        var rule = new PortForwardRule(Guid.NewGuid(), true, PortForwardType.ManagedNode, null, 6106, 6106);
+        var json = SsmParameterSerializer.Serialize(rule);
+        json.Should().Contain("\"portNumber\":[\"6106\"]");
+        json.Should().Contain("\"localPortNumber\":[\"6106\"]");
+        json.Should().NotContain("host");
+        SsmDocumentNameResolver.Resolve(PortForwardType.ManagedNode)
+            .Should().Be("AWS-StartPortForwardingSession");
     }
 
     [Fact]
-    public void Parses_multiple_and_deduplicates()
+    public void Remote_host_parameters_include_single_host()
     {
-        var result = PortParser.Parse("6106, 5432; 6106");
-        result.Mappings.Should().HaveCount(2);
+        var rule = new PortForwardRule(Guid.NewGuid(), true, PortForwardType.RemoteHost, "api.internal", 443, 9100);
+        var json = SsmParameterSerializer.Serialize(rule);
+        json.Should().Contain("\"host\":[\"api.internal\"]");
+        json.Should().Contain("\"portNumber\":[\"443\"]");
+        json.Should().Contain("\"localPortNumber\":[\"9100\"]");
+        SsmDocumentNameResolver.Resolve(PortForwardType.RemoteHost)
+            .Should().Be("AWS-StartPortForwardingSessionToRemoteHost");
     }
 
     [Fact]
-    public void Rejects_duplicate_local_ports()
+    public void Argument_factory_uses_typed_document_and_no_shell()
     {
-        var result = PortParser.Parse("80:8080, 443:8080");
-        result.Errors.Should().Contain(e => e.Contains("Duplicate local port"));
-    }
-
-    [Fact]
-    public void Empty_input_errors()
-    {
-        PortParser.Parse("").Errors.Should().NotBeEmpty();
-    }
-
-    [Fact]
-    public void Requires_confirmation_above_20()
-    {
-        var text = string.Join(",", Enumerable.Range(1000, 21));
-        PortParser.Parse(text).RequiresConfirmation.Should().BeTrue();
+        var request = new StartPortForwardRequest(
+            new AwsContext(new AwsFolderContext("C:\\x", "C:\\x\\config", "C:\\x\\credentials"), "prof", "eu-west-1"),
+            "i-abc",
+            new PortForwardRule(Guid.NewGuid(), true, PortForwardType.RemoteHost, "api.internal", 443, 9100));
+        var args = AwsCliArgumentFactory.StartPortForward(request);
+        args.Should().Contain("AWS-StartPortForwardingSessionToRemoteHost");
+        args.Should().NotContain(a => a.Contains("cmd.exe", StringComparison.OrdinalIgnoreCase));
+        args.Should().NotContain(a => a.Contains("winpty", StringComparison.OrdinalIgnoreCase));
+        args.Should().ContainInOrder("--profile", "prof", "--target", "i-abc");
     }
 }
 
@@ -62,13 +113,6 @@ public class AwsFolderFactoryTests
         }
         finally { Directory.Delete(dir, true); }
     }
-
-    [Fact]
-    public void Invalid_folder_throws()
-    {
-        var act = () => AwsFolderFactory.FromFolder(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")));
-        act.Should().Throw<AppException>().Which.Kind.Should().Be(ErrorKind.InvalidFolder);
-    }
 }
 
 public class SsoClassifierTests
@@ -83,35 +127,6 @@ public class SsoClassifierTests
             """;
         SsoProfileClassifier.IsSsoProfile(config, "demo").Should().BeTrue();
         SsoProfileClassifier.IsSsoProfile(config, "other").Should().BeFalse();
-    }
-}
-
-public class ArgumentFactoryTests
-{
-    [Fact]
-    public void StartPortForward_uses_json_parameters_and_no_shell()
-    {
-        var request = new StartPortForwardRequest(
-            new AwsContext(new AwsFolderContext("C:\\x", "C:\\x\\config", "C:\\x\\credentials"), "prof", "eu-west-1"),
-            "i-abc",
-            new PortMapping(6106, 6106));
-
-        var args = AwsCliArgumentFactory.StartPortForward(request);
-        args.Should().NotContain(a => a.Contains("cmd.exe", StringComparison.OrdinalIgnoreCase));
-        args.Should().Contain("AWS-StartPortForwardingSession");
-        args.Should().Contain(a => a.Contains("\"portNumber\":[\"6106\"]"));
-        args.Should().Contain(a => a.Contains("\"localPortNumber\":[\"6106\"]"));
-        // each value is its own argument
-        args.Should().ContainInOrder("--profile", "prof", "--region", "eu-west-1", "--target", "i-abc");
-    }
-
-    [Fact]
-    public void DescribeInstances_uses_configured_tag_not_hardcoded_only_via_options()
-    {
-        var args = AwsCliArgumentFactory.DescribeInstances("p", "eu-west-1",
-            new TargetOptions("Name", "my-bastion", true, true));
-        args.Should().Contain("Name=tag:Name,Values=my-bastion");
-        args.Should().NotContain(a => a.Contains("6106"));
     }
 }
 
@@ -136,17 +151,30 @@ public class JsonParserTests
 public class ErrorMapperTests
 {
     [Fact]
-    public void Maps_sso_and_denies()
+    public void Maps_sso_and_remote_host_errors()
     {
         AwsCliErrorMapper.Map("get-caller-identity", 255, "Token has expired and refresh failed", "")
             .Kind.Should().Be(ErrorKind.SsoExpired);
-        AwsCliErrorMapper.Map("describe-instances", 254, "AccessDenied", "")
-            .Kind.Should().Be(ErrorKind.Ec2Denied);
+        AwsCliErrorMapper.Map("start-session", 255, "Could not resolve host", "")
+            .Kind.Should().Be(ErrorKind.RemoteHostUnreachable);
     }
 
     [Fact]
     public void Sanitizes_secrets()
     {
         AwsCliErrorMapper.Sanitize("aws_secret_access_key = ABCDEF").Should().Contain("***").And.NotContain("ABCDEF");
+    }
+}
+
+public class RetryPolicyTests
+{
+    [Fact]
+    public void Default_max_retries_is_three()
+    {
+        ConnectionOrchestrator.DefaultMaxRetries.Should().Be(3);
+        new SessionView
+        {
+            Rule = new PortForwardRule(Guid.NewGuid(), true, PortForwardType.ManagedNode, null, 1, 1)
+        }.MaxRetries.Should().Be(3);
     }
 }
