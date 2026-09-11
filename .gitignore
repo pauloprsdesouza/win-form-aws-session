@@ -1,0 +1,27 @@
+## .NET
+bin/
+obj/
+[Bb]uild/
+[Ll]og/
+[Ll]ogs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.DotSettings.user
+
+## Publish / artifacts
+publish/
+**/bin/
+**/obj/
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+## Secrets / local
+.env
+*.pfx
+*.snk

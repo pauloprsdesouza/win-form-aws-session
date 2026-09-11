@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AwsSessionLauncher.WinForms/AwsSessionLauncher.WinForms.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AwsSessionLauncher.IntegrationTests/AwsSessionLauncher.IntegrationTests.csproj" />
+    <Project Path="tests/AwsSessionLauncher.UnitTests/AwsSessionLauncher.UnitTests.csproj" />
+  </Folder>
+</Solution>
