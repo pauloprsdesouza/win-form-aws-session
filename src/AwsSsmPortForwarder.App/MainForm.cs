@@ -14,18 +14,18 @@ public sealed class MainForm : Form
     private readonly ILogger<MainForm> _logger;
 
     private readonly TextBox _folderBox = new() { Dock = DockStyle.Fill };
-    private readonly Button _browse = new() { Text = "Browse", Width = 90, Height = 28 };
-    private readonly Label _folderStatus = new() { AutoSize = true, Text = "—" };
-    private readonly Label _prereqStatus = new() { AutoSize = true, Text = "—" };
+    private readonly Button _browse = new() { Text = "Browse", MinimumSize = new Size(100, 36), Height = 36, AutoSize = true };
+    private readonly Label _folderStatus = new() { AutoSize = true, Text = "—", MaximumSize = new Size(280, 0) };
+    private readonly Label _prereqStatus = new() { AutoSize = true, Text = "—", MaximumSize = new Size(220, 0) };
     private readonly ComboBox _profiles = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
-    private readonly Button _reload = new() { Text = "Reload", Width = 90, Height = 28 };
-    private readonly Label _authLabel = new() { AutoSize = true, Text = "Authentication: —" };
-    private readonly Button _signIn = new() { Text = "Sign in", Width = 90, Height = 28, Enabled = false };
-    private readonly Button _deviceCode = new() { Text = "Device code", Width = 100, Height = 28, Enabled = false, Visible = false };
-    private readonly Label _regionLabel = new() { AutoSize = true, Text = "Region: —" };
-    private readonly Label _targetLabel = new() { AutoSize = true, Text = "Bastion: —", MaximumSize = new Size(420, 0) };
+    private readonly Button _reload = new() { Text = "Reload", MinimumSize = new Size(100, 36), Height = 36, AutoSize = true };
+    private readonly Label _authLabel = new() { AutoSize = true, Text = "Authentication: —", MaximumSize = new Size(420, 0) };
+    private readonly Button _signIn = new() { Text = "Sign in", MinimumSize = new Size(110, 36), Height = 36, AutoSize = true, Enabled = false, Visible = false };
+    private readonly Button _deviceCode = new() { Text = "Device code", MinimumSize = new Size(120, 36), Height = 36, AutoSize = true, Enabled = false, Visible = false };
+    private readonly Label _regionLabel = new() { AutoSize = true, Text = "Region: —", MaximumSize = new Size(280, 0) };
+    private readonly Label _targetLabel = new() { AutoSize = true, Text = "Bastion: —", MaximumSize = new Size(520, 0) };
     private readonly CheckBox _remember = new() { Text = "Remember connections", AutoSize = true };
-    private readonly Button _addConnection = new() { Text = "+ Add connection", AutoSize = true };
+    private readonly Button _addConnection = new() { Text = "+ Add connection", MinimumSize = new Size(140, 36), Height = 36, AutoSize = true };
     private readonly DataGridView _grid = new()
     {
         Dock = DockStyle.Fill,
@@ -37,14 +37,22 @@ public sealed class MainForm : Form
         RowHeadersVisible = false,
         BackgroundColor = SystemColors.Window,
         BorderStyle = BorderStyle.FixedSingle,
-        EnableHeadersVisualStyles = false
+        EnableHeadersVisualStyles = false,
+        EditMode = DataGridViewEditMode.EditOnEnter
     };
     private readonly Label _summary = new() { AutoSize = true, Text = "0 ready • 0 incomplete • 0 active", TextAlign = ContentAlignment.MiddleLeft };
-    private readonly Button _connect = new() { Text = "Start enabled", Width = 120, Height = 32, Enabled = false };
-    private readonly Button _stopAll = new() { Text = "Stop all", Width = 100, Height = 32 };
-    private readonly Button _retryFailed = new() { Text = "Retry failed", Width = 110, Height = 32 };
+    private readonly Button _connect = new() { Text = "Start enabled", MinimumSize = new Size(140, 40), Height = 40, AutoSize = true, Enabled = false };
+    private readonly Button _stopAll = new() { Text = "Stop all", MinimumSize = new Size(110, 40), Height = 40, AutoSize = true };
+    private readonly Button _retryFailed = new() { Text = "Retry failed", MinimumSize = new Size(120, 40), Height = 40, AutoSize = true };
     private readonly Label _status = new() { AutoSize = false, Dock = DockStyle.Fill, Text = "Initializing", TextAlign = ContentAlignment.MiddleLeft };
-    private readonly ProgressBar _progress = new() { Dock = DockStyle.Fill, Style = ProgressBarStyle.Continuous };
+    private readonly ProgressBar _progress = new()
+    {
+        Dock = DockStyle.Fill,
+        Style = ProgressBarStyle.Continuous,
+        Minimum = 0,
+        Maximum = 100,
+        Value = 0
+    };
 
     private readonly BindingList<ConnectionRow> _rows = [];
     private UserSettings _settings = new();
@@ -58,6 +66,8 @@ public sealed class MainForm : Form
     private bool _exitConfirmed;
     private int _busyCount;
     private bool _suppressGridEvents;
+    private bool _suppressProfileEvents;
+    private bool _startupComplete;
 
     public MainForm(
         IAwsCliClient aws,
@@ -74,9 +84,10 @@ public sealed class MainForm : Form
 
         Text = "AWS Port Forwarding";
         Font = new Font("Segoe UI", 9f);
-        MinimumSize = new Size(860, 640);
+        MinimumSize = new Size(960, 720);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(920, 700);
+        ClientSize = new Size(1000, 760);
+        AutoScaleMode = AutoScaleMode.Dpi;
 
         ConfigureGrid();
         BuildLayout();
@@ -92,8 +103,10 @@ public sealed class MainForm : Form
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
             Alignment = DataGridViewContentAlignment.MiddleLeft
         };
-        _grid.DefaultCellStyle.Padding = new Padding(4);
-        _grid.RowTemplate.Height = 28;
+        _grid.DefaultCellStyle.Padding = new Padding(6, 4, 6, 4);
+        _grid.ColumnHeadersHeight = 36;
+        _grid.RowTemplate.Height = 38;
+        _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
 
         var enabled = new DataGridViewCheckBoxColumn { DataPropertyName = nameof(ConnectionRow.Enabled), HeaderText = "", Width = 36 };
         var type = new DataGridViewComboBoxColumn
@@ -122,9 +135,9 @@ public sealed class MainForm : Form
             Width = 120,
             ReadOnly = true
         };
-        var start = new DataGridViewButtonColumn { HeaderText = "", Text = "Start", Width = 60, UseColumnTextForButtonValue = true };
-        var stop = new DataGridViewButtonColumn { HeaderText = "", Text = "Stop", Width = 60, UseColumnTextForButtonValue = true };
-        var delete = new DataGridViewButtonColumn { HeaderText = "", Text = "Delete", Width = 70, UseColumnTextForButtonValue = true };
+        var start = new DataGridViewButtonColumn { HeaderText = "", Text = "Start", Width = 80, UseColumnTextForButtonValue = true };
+        var stop = new DataGridViewButtonColumn { HeaderText = "", Text = "Stop", Width = 80, UseColumnTextForButtonValue = true };
+        var delete = new DataGridViewButtonColumn { HeaderText = "", Text = "Delete", Width = 88, UseColumnTextForButtonValue = true };
 
         _grid.Columns.AddRange(enabled, type, destination, remote, local, status, start, stop, delete);
         _grid.DataSource = _rows;
@@ -139,10 +152,10 @@ public sealed class MainForm : Form
             RowCount = 4,
             Padding = new Padding(16, 12, 16, 12)
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
 
         root.Controls.Add(BuildContextCard(), 0, 0);
         root.Controls.Add(BuildConnectionsCard(), 0, 1);
@@ -153,41 +166,47 @@ public sealed class MainForm : Form
 
     private GroupBox BuildContextCard()
     {
-        var group = new GroupBox { Text = "AWS context", Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 8) };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 3 };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
+        var group = new GroupBox { Text = "AWS context", Dock = DockStyle.Fill, Padding = new Padding(10, 10, 10, 10) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 4 };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
 
         grid.Controls.Add(Lbl("Folder"), 0, 0);
         grid.Controls.Add(_folderBox, 1, 0);
         grid.Controls.Add(_browse, 2, 0);
 
-        var folderMeta = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        _folderStatus.Margin = new Padding(0, 6, 12, 0);
-        _prereqStatus.Margin = new Padding(0, 6, 0, 0);
+        var folderMeta = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
+        _folderStatus.Margin = new Padding(0, 2, 12, 0);
+        _prereqStatus.Margin = new Padding(0, 2, 0, 0);
         folderMeta.Controls.AddRange([_folderStatus, _prereqStatus]);
-        grid.Controls.Add(folderMeta, 3, 0);
+        grid.Controls.Add(folderMeta, 1, 1);
+        grid.SetColumnSpan(folderMeta, 2);
 
-        grid.Controls.Add(Lbl("Profile"), 0, 1);
-        grid.Controls.Add(_profiles, 1, 1);
-        grid.Controls.Add(_reload, 2, 1);
-        var authFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        _authLabel.Margin = new Padding(0, 6, 8, 0);
-        authFlow.Controls.AddRange([_authLabel, _signIn, _deviceCode]);
-        grid.Controls.Add(authFlow, 3, 1);
+        grid.Controls.Add(Lbl("Profile"), 0, 2);
+        grid.Controls.Add(_profiles, 1, 2);
+        grid.Controls.Add(_reload, 2, 2);
 
-        var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        _regionLabel.Margin = new Padding(0, 6, 24, 0);
-        _targetLabel.Margin = new Padding(0, 6, 16, 0);
-        _remember.Margin = new Padding(0, 4, 0, 0);
-        bottom.Controls.AddRange([_regionLabel, _targetLabel, _remember]);
-        grid.Controls.Add(bottom, 1, 2);
-        grid.SetColumnSpan(bottom, 3);
+        var authRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        authRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        authRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var authLeft = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
+        _authLabel.Margin = new Padding(0, 8, 12, 0);
+        _regionLabel.Margin = new Padding(0, 8, 16, 0);
+        _targetLabel.Margin = new Padding(0, 8, 12, 0);
+        _remember.Margin = new Padding(0, 6, 0, 0);
+        authLeft.Controls.AddRange([_authLabel, _regionLabel, _targetLabel, _remember]);
+        var authButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        _signIn.Margin = new Padding(0, 0, 8, 0);
+        authButtons.Controls.AddRange([_signIn, _deviceCode]);
+        authRow.Controls.Add(authLeft, 0, 0);
+        authRow.Controls.Add(authButtons, 1, 0);
+        grid.Controls.Add(authRow, 1, 3);
+        grid.SetColumnSpan(authRow, 2);
 
         group.Controls.Add(grid);
         return group;
@@ -197,7 +216,7 @@ public sealed class MainForm : Form
     {
         var group = new GroupBox { Text = "Connections", Dock = DockStyle.Fill, Padding = new Padding(10, 8, 10, 10) };
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var header = new FlowLayoutPanel
@@ -258,8 +277,12 @@ public sealed class MainForm : Form
     private void Wire()
     {
         _browse.Click += async (_, _) => await BrowseFolderAsync();
-        _reload.Click += async (_, _) => await ApplyFolderTextAsync();
-        _profiles.SelectedIndexChanged += async (_, _) => await OnProfileChangedAsync();
+        _reload.Click += async (_, _) => await ApplyFolderTextAsync(validateSelectedProfile: true);
+        _profiles.SelectedIndexChanged += async (_, _) =>
+        {
+            if (_suppressProfileEvents) return;
+            await OnProfileChangedAsync();
+        };
         _signIn.Click += async (_, _) => await SignInAsync(SsoLoginMode.Browser);
         _deviceCode.Click += async (_, _) => await SignInAsync(SsoLoginMode.DeviceCode);
         _addConnection.Click += (_, _) => AddConnectionRow();
@@ -267,11 +290,20 @@ public sealed class MainForm : Form
         _stopAll.Click += async (_, _) => await RunBusy(() => _orchestrator.StopAllAsync(_cts.Token), "Stopping tunnels…");
         _retryFailed.Click += async (_, _) => await RetryFailedAsync();
         _remember.CheckedChanged += async (_, _) => { _settings.RememberConnections = _remember.Checked; await PersistAsync(); };
-        _folderBox.Leave += async (_, _) => await ApplyFolderTextAsync();
+        _folderBox.Leave += async (_, _) =>
+        {
+            if (!_startupComplete) return;
+            await ApplyFolderTextAsync(validateSelectedProfile: false);
+        };
         _grid.CellValueChanged += GridOnCellValueChanged;
+        _grid.CellEndEdit += GridOnCellEndEdit;
+        _grid.EditingControlShowing += GridOnEditingControlShowing;
         _grid.CurrentCellDirtyStateChanged += (_, _) =>
         {
-            if (_grid.IsCurrentCellDirty) _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            // Commit only checkbox/combo immediately; text cells commit on EndEdit to avoid caret reset.
+            if (!_grid.IsCurrentCellDirty || _grid.CurrentCell is null) return;
+            if (_grid.CurrentCell is DataGridViewCheckBoxCell or DataGridViewComboBoxCell)
+                _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
         };
         _grid.CellBeginEdit += GridOnCellBeginEdit;
         _grid.CellContentClick += async (_, e) => await GridOnButtonClickAsync(e);
@@ -313,23 +345,56 @@ public sealed class MainForm : Form
         if (col == nameof(ConnectionRow.TypeDisplay))
         {
             if (row.Type == PortForwardType.ManagedNode)
-                row.Destination = "Bastion (same target)";
+                row.SetDestinationWithoutNotify("Bastion (same target)");
             else if (row.Destination == "Bastion (same target)")
-                row.Destination = "";
+                row.SetDestinationWithoutNotify("");
+            UpdateDestinationReadOnly(e.RowIndex);
+            row.RefreshValidation();
+            UpdateSummaryAndConnect();
+            _ = PersistAsync();
+            return;
         }
 
+        if (col == nameof(ConnectionRow.Enabled))
+        {
+            row.RefreshValidation();
+            UpdateSummaryAndConnect();
+            _ = PersistAsync();
+        }
+    }
+
+    private void GridOnCellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (_suppressGridEvents || e.RowIndex < 0 || e.RowIndex >= _rows.Count) return;
+        var row = _rows[e.RowIndex];
+        var col = _grid.Columns[e.ColumnIndex].DataPropertyName;
+
         if (col == nameof(ConnectionRow.RemotePortText) &&
+            row.LocalPortLinked &&
             string.IsNullOrWhiteSpace(row.LocalPortText) &&
             !string.IsNullOrWhiteSpace(row.RemotePortText))
         {
-            row.LocalPortText = row.RemotePortText;
-            row.LocalPortLinked = false;
+            row.SetLocalPortWithoutNotify(row.RemotePortText);
         }
 
         row.RefreshValidation();
-        UpdateDestinationReadOnly(e.RowIndex);
         UpdateSummaryAndConnect();
         _ = PersistAsync();
+    }
+
+    private void GridOnEditingControlShowing(object? sender, DataGridViewEditingControlShowingEventArgs e)
+    {
+        if (e.Control is not TextBox textBox) return;
+        textBox.AutoSize = false;
+        // Place caret at end instead of selecting all when edit begins.
+        BeginInvoke(() =>
+        {
+            if (!textBox.IsDisposed && textBox.Focused)
+            {
+                textBox.SelectionLength = 0;
+                textBox.SelectionStart = textBox.TextLength;
+            }
+        });
     }
 
     private void UpdateDestinationReadOnly(int rowIndex)
@@ -411,10 +476,18 @@ public sealed class MainForm : Form
             }
 
             _folderBox.Text = folder;
-            await ApplyFolderTextAsync();
+            // Load folder/profiles only — do not validate or start tunnels on startup.
+            await ApplyFolderTextAsync(validateSelectedProfile: false);
+            SetReady(AppReadyState.ProfileRequired,
+                "Select a profile (or click Reload) to authenticate. Connections start only when you click Start.");
         }
         catch (Exception ex) { ShowError(ex); }
-        finally { SetBusy(false); }
+        finally
+        {
+            _startupComplete = true;
+            SetBusy(false, "Ready — click Reload or select a profile to authenticate.");
+            ResetProgressIdle();
+        }
     }
 
     private void LoadSavedConnections()
@@ -445,10 +518,10 @@ public sealed class MainForm : Form
         if (suggested is not null) dlg.InitialDirectory = suggested;
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         _folderBox.Text = dlg.SelectedPath;
-        await ApplyFolderTextAsync();
+        await ApplyFolderTextAsync(validateSelectedProfile: true);
     }
 
-    private async Task ApplyFolderTextAsync()
+    private async Task ApplyFolderTextAsync(bool validateSelectedProfile)
     {
         try
         {
@@ -463,6 +536,7 @@ public sealed class MainForm : Form
             _cts.Cancel();
             _cts = new CancellationTokenSource();
             ClearAuthTarget();
+            HideSignInActions();
             SetBusy(true, "Discovering profiles…");
             SetReady(AppReadyState.DiscoveringProfiles, "Discovering profiles…");
 
@@ -472,24 +546,42 @@ public sealed class MainForm : Form
             await PersistAsync();
 
             var profiles = await _aws.ListProfilesAsync(_folder, _cts.Token);
-            _profiles.Items.Clear();
-            foreach (var p in profiles) _profiles.Items.Add(p);
-
-            if (profiles.Count == 0)
+            _suppressProfileEvents = true;
+            try
             {
-                SetReady(AppReadyState.ProfileRequired, "No profiles were found.");
-                return;
+                _profiles.Items.Clear();
+                foreach (var p in profiles) _profiles.Items.Add(p);
+
+                if (profiles.Count == 0)
+                {
+                    SetReady(AppReadyState.ProfileRequired, "No profiles were found.");
+                    return;
+                }
+
+                var idx = profiles.ToList().FindIndex(p => p.Equals(_settings.LastProfile, StringComparison.OrdinalIgnoreCase));
+                _profiles.SelectedIndex = idx >= 0 ? idx : 0;
+            }
+            finally
+            {
+                _suppressProfileEvents = false;
             }
 
-            var idx = profiles.ToList().FindIndex(p => p.Equals(_settings.LastProfile, StringComparison.OrdinalIgnoreCase));
-            _profiles.SelectedIndex = idx >= 0 ? idx : 0;
+            if (validateSelectedProfile)
+                await OnProfileChangedAsync();
+            else
+                SetReady(AppReadyState.ProfileRequired,
+                    "Profiles loaded. Select a profile or click Reload to authenticate — Start opens tunnels.");
         }
         catch (Exception ex)
         {
             ShowError(ex);
             SetReady(AppReadyState.FolderRequired, "Select an AWS folder.");
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            SetBusy(false);
+            ResetProgressIdle();
+        }
     }
 
     private async Task OnProfileChangedAsync()
@@ -498,6 +590,7 @@ public sealed class MainForm : Form
         try
         {
             ClearAuthTarget();
+            HideSignInActions();
             SetBusy(true, "Validating authentication…");
             SetReady(AppReadyState.ValidatingAuthentication, "Checking…");
             var profile = _profiles.SelectedItem.ToString()!;
@@ -515,29 +608,53 @@ public sealed class MainForm : Form
 
             if (signInRequired)
             {
-                _authLabel.Text = "Authentication: Sign-in required";
-                _signIn.Enabled = true;
-                _deviceCode.Visible = true;
-                _deviceCode.Enabled = true;
-                SetReady(AppReadyState.SignInRequired, "Sign-in approval is required.");
+                ShowSignInRequired(isSso);
                 return;
             }
 
             if (identity is null)
             {
                 _authLabel.Text = $"Authentication: {message ?? "invalid"}";
-                _signIn.Enabled = false;
-                SetReady(AppReadyState.Error, message ?? "Credentials are missing, invalid, or expired.");
+                HideSignInActions();
+                SetReady(AppReadyState.Error, message ?? "Credentials are missing, invalid, or expired. Update AWS files and click Reload.");
                 return;
             }
 
             _authLabel.Text = isSso ? "Authentication: ✓ SSO Connected" : "Authentication: ✓ Connected";
-            _signIn.Enabled = false;
-            _deviceCode.Visible = false;
+            HideSignInActions();
             await ResolveTargetAsync(context);
         }
         catch (Exception ex) { ShowError(ex); }
-        finally { SetBusy(false); }
+        finally
+        {
+            SetBusy(false);
+            if (_ready != AppReadyState.SignInRequired)
+                ResetProgressIdle();
+        }
+    }
+
+    private void ShowSignInRequired(bool isSso)
+    {
+        _authLabel.Text = isSso
+            ? "Authentication: Sign-in required"
+            : "Authentication: Sign-in required (SSO)";
+        _authLabel.ForeColor = Color.DarkOrange;
+        _signIn.Visible = true;
+        _signIn.Enabled = true;
+        _deviceCode.Visible = true;
+        _deviceCode.Enabled = true;
+        SetReady(AppReadyState.SignInRequired, "Sign-in approval is required. Click Sign in to continue in the browser.");
+        ResetProgressIdle();
+        BeginInvoke(() => _signIn.Focus());
+    }
+
+    private void HideSignInActions()
+    {
+        _authLabel.ForeColor = SystemColors.ControlText;
+        _signIn.Visible = false;
+        _signIn.Enabled = false;
+        _deviceCode.Visible = false;
+        _deviceCode.Enabled = false;
     }
 
     private async Task SignInAsync(SsoLoginMode mode)
@@ -545,17 +662,34 @@ public sealed class MainForm : Form
         if (_folder is null || _profiles.SelectedItem is null) return;
         try
         {
-            SetBusy(true, mode == SsoLoginMode.Browser ? "Waiting for browser sign-in…" : "Waiting for device code…");
+            _signIn.Enabled = false;
+            _deviceCode.Enabled = false;
+            SetBusy(true, mode == SsoLoginMode.Browser
+                ? "Waiting for browser sign-in… Complete approval in your browser."
+                : "Waiting for device code sign-in…");
             await _orchestrator.SsoLoginAsync(new AwsContext(_folder, _profiles.SelectedItem.ToString()!, _region), mode, _cts.Token);
             await OnProfileChangedAsync();
         }
-        catch (Exception ex)
+        catch (AppException ex) when (ex.Kind == ErrorKind.SsoCancelled)
         {
-            _deviceCode.Visible = true;
-            _deviceCode.Enabled = true;
+            ShowSignInRequired(true);
             ShowError(ex);
         }
-        finally { SetBusy(false); }
+        catch (Exception ex)
+        {
+            ShowSignInRequired(true);
+            ShowError(ex);
+        }
+        finally
+        {
+            SetBusy(false);
+            if (_ready == AppReadyState.SignInRequired)
+            {
+                _signIn.Enabled = true;
+                _deviceCode.Enabled = true;
+            }
+            ResetProgressIdle();
+        }
     }
 
     private async Task ResolveTargetAsync(AwsContext context)
@@ -601,11 +735,25 @@ public sealed class MainForm : Form
             ShowError(ex);
             SetReady(AppReadyState.Error, ex is AppException ae ? ae.UserMessage : ex.Message);
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            SetBusy(false);
+            ResetProgressIdle();
+        }
     }
 
     private async Task ConnectEnabledAsync()
     {
+        if (_ready != AppReadyState.Ready)
+        {
+            MessageBox.Show(this,
+                _ready == AppReadyState.SignInRequired
+                    ? "Sign in is required before starting tunnels."
+                    : "Authenticate and resolve a bastion before starting tunnels. Click Reload or select a profile.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         CommitGrid();
         var rules = _rows.Select(r => r.ToRule()).Where(r => r.Enabled).ToList();
         await StartRulesAsync(rules);
@@ -613,6 +761,16 @@ public sealed class MainForm : Form
 
     private async Task StartSingleAsync(ConnectionRow row)
     {
+        if (_ready != AppReadyState.Ready)
+        {
+            MessageBox.Show(this,
+                _ready == AppReadyState.SignInRequired
+                    ? "Sign in is required before starting tunnels."
+                    : "Authenticate and resolve a bastion before starting tunnels. Click Reload or select a profile.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         CommitGrid();
         row.Enabled = true;
         await StartRulesAsync([row.ToRule()]);
@@ -726,25 +884,23 @@ public sealed class MainForm : Form
     private void ApplyProgress(ProgressUpdate update)
     {
         _status.Text = update.Message;
-        if (update.IsBusy)
-        {
-            if (update.Percent is int p)
-            {
-                _progress.Style = ProgressBarStyle.Continuous;
-                _progress.Value = Math.Clamp(p, 0, 100);
-            }
-            else
-            {
-                _progress.Style = ProgressBarStyle.Marquee;
-                _progress.MarqueeAnimationSpeed = 30;
-            }
-        }
-        else
-        {
-            _progress.Style = ProgressBarStyle.Continuous;
-            _progress.MarqueeAnimationSpeed = 0;
-            _progress.Value = update.Percent ?? 0;
-        }
+        // Never use Marquee — it runs forever if IsBusy is left true.
+        _progress.Style = ProgressBarStyle.Continuous;
+        _progress.MarqueeAnimationSpeed = 0;
+        if (update.Percent is int p)
+            _progress.Value = Math.Clamp(p, 0, 100);
+        else if (update.IsBusy)
+            _progress.Value = Math.Max(_progress.Value, 8);
+        else if (_busyCount == 0)
+            _progress.Value = 0;
+    }
+
+    private void ResetProgressIdle()
+    {
+        if (_busyCount > 0) return;
+        _progress.Style = ProgressBarStyle.Continuous;
+        _progress.MarqueeAnimationSpeed = 0;
+        _progress.Value = 0;
     }
 
     private void SetBusy(bool busy, string? message = null)
@@ -758,7 +914,9 @@ public sealed class MainForm : Form
         _profiles.Enabled = !isBusy;
         _addConnection.Enabled = !isBusy;
         if (message is not null)
-            ApplyProgress(new ProgressUpdate { Message = message, IsBusy = isBusy, Percent = isBusy ? null : 0 });
+            ApplyProgress(new ProgressUpdate { Message = message, IsBusy = isBusy, Percent = isBusy ? 12 : 0 });
+        if (!isBusy)
+            ResetProgressIdle();
         UpdateSummaryAndConnect();
     }
 
@@ -777,7 +935,11 @@ public sealed class MainForm : Form
         SetBusy(true, busyMessage);
         try { await action(); }
         catch (Exception ex) { ShowError(ex); }
-        finally { SetBusy(false); }
+        finally
+        {
+            SetBusy(false);
+            ResetProgressIdle();
+        }
     }
 
     private void ShowError(Exception ex)
@@ -817,7 +979,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            ApplyProgress(new ProgressUpdate { Message = "Stopping tunnels and exiting…", IsBusy = true });
+            ApplyProgress(new ProgressUpdate { Message = "Stopping tunnels and exiting…", IsBusy = true, Percent = 20 });
             await _orchestrator.StopAllAsync(CancellationToken.None);
             await PersistAsync();
         }
@@ -868,43 +1030,70 @@ public sealed class ConnectionRow : INotifyPropertyChanged
     public string Destination
     {
         get => _destination;
-        set { _destination = value; OnChanged(nameof(Destination)); RefreshValidation(); }
+        set
+        {
+            if (_destination == value) return;
+            _destination = value;
+            OnChanged(nameof(Destination));
+            // Do not RefreshValidation here — StatusText change resets grid caret/selection while typing.
+        }
     }
 
     public string RemotePortText
     {
         get => _remotePortText;
-        set { _remotePortText = value; OnChanged(nameof(RemotePortText)); RefreshValidation(); }
+        set
+        {
+            if (_remotePortText == value) return;
+            _remotePortText = value;
+            OnChanged(nameof(RemotePortText));
+        }
     }
 
     public string LocalPortText
     {
         get => _localPortText;
-        set { _localPortText = value; LocalPortLinked = false; OnChanged(nameof(LocalPortText)); RefreshValidation(); }
+        set
+        {
+            if (_localPortText == value) return;
+            _localPortText = value;
+            LocalPortLinked = false;
+            OnChanged(nameof(LocalPortText));
+        }
     }
 
     public string StatusText
     {
         get => _statusText;
-        set { _statusText = value; OnChanged(nameof(StatusText)); }
+        set
+        {
+            if (_statusText == value) return;
+            _statusText = value;
+            OnChanged(nameof(StatusText));
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public static ConnectionRow CreateNew() => new();
 
-    public static ConnectionRow FromRule(PortForwardRule rule) => new()
+    public static ConnectionRow FromRule(PortForwardRule rule)
     {
-        Id = rule.Id,
-        Enabled = rule.Enabled,
-        TypeDisplay = rule.Type == PortForwardType.RemoteHost ? "Remote host" : "Managed node",
-        Destination = rule.Type == PortForwardType.RemoteHost
+        var row = new ConnectionRow
+        {
+            Id = rule.Id,
+            LocalPortLinked = false
+        };
+        row._enabled = rule.Enabled;
+        row._typeDisplay = rule.Type == PortForwardType.RemoteHost ? "Remote host" : "Managed node";
+        row._destination = rule.Type == PortForwardType.RemoteHost
             ? (rule.RemoteHost ?? "")
-            : "Bastion (same target)",
-        RemotePortText = rule.RemotePort?.ToString() ?? "",
-        LocalPortText = rule.LocalPort?.ToString() ?? "",
-        LocalPortLinked = false
-    };
+            : "Bastion (same target)";
+        row._remotePortText = rule.RemotePort?.ToString() ?? "";
+        row._localPortText = rule.LocalPort?.ToString() ?? "";
+        row.RefreshValidation();
+        return row;
+    }
 
     public PortForwardRule ToRule()
     {
@@ -918,6 +1107,10 @@ public sealed class ConnectionRow : INotifyPropertyChanged
             remote,
             local);
     }
+
+    public void SetDestinationWithoutNotify(string value) => _destination = value;
+
+    public void SetLocalPortWithoutNotify(string value) => _localPortText = value;
 
     public void RefreshValidation()
     {
