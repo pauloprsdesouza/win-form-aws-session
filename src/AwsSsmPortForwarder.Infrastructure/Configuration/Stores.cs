@@ -10,7 +10,8 @@ public sealed class FileUserSettingsStore : IUserSettingsStore
     private static readonly JsonSerializerOptions Json = new()
     {
         WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
     };
 
     public FileUserSettingsStore()

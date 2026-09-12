@@ -67,7 +67,10 @@ public sealed class MainForm : Form
     private int _busyCount;
     private bool _suppressGridEvents;
     private bool _suppressProfileEvents;
+    private bool _suppressSettingsEvents;
     private bool _startupComplete;
+    private int _startColumnIndex = -1;
+    private int _destinationColumnIndex = -1;
 
     public MainForm(
         IAwsCliClient aws,
@@ -109,6 +112,13 @@ public sealed class MainForm : Form
         _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
 
         var enabled = new DataGridViewCheckBoxColumn { DataPropertyName = nameof(ConnectionRow.Enabled), HeaderText = "", Width = 36 };
+        var name = new DataGridViewTextBoxColumn
+        {
+            DataPropertyName = nameof(ConnectionRow.Name),
+            HeaderText = "Name",
+            Width = 140,
+            MinimumWidth = 100
+        };
         var type = new DataGridViewComboBoxColumn
         {
             DataPropertyName = nameof(ConnectionRow.TypeDisplay),
@@ -124,7 +134,7 @@ public sealed class MainForm : Form
             DataPropertyName = nameof(ConnectionRow.Destination),
             HeaderText = "Destination",
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-            MinimumWidth = 180
+            MinimumWidth = 160
         };
         var remote = new DataGridViewTextBoxColumn { DataPropertyName = nameof(ConnectionRow.RemotePortText), HeaderText = "Remote", Width = 70 };
         var local = new DataGridViewTextBoxColumn { DataPropertyName = nameof(ConnectionRow.LocalPortText), HeaderText = "Local", Width = 70 };
@@ -135,12 +145,22 @@ public sealed class MainForm : Form
             Width = 120,
             ReadOnly = true
         };
-        var start = new DataGridViewButtonColumn { HeaderText = "", Text = "Start", Width = 80, UseColumnTextForButtonValue = true };
+        var start = new DataGridViewButtonColumn
+        {
+            HeaderText = "",
+            Text = "Start",
+            Width = 80,
+            UseColumnTextForButtonValue = false,
+            FlatStyle = FlatStyle.Standard
+        };
         var stop = new DataGridViewButtonColumn { HeaderText = "", Text = "Stop", Width = 80, UseColumnTextForButtonValue = true };
         var delete = new DataGridViewButtonColumn { HeaderText = "", Text = "Delete", Width = 88, UseColumnTextForButtonValue = true };
 
-        _grid.Columns.AddRange(enabled, type, destination, remote, local, status, start, stop, delete);
+        _grid.Columns.AddRange(enabled, name, type, destination, remote, local, status, start, stop, delete);
+        _destinationColumnIndex = destination.Index;
+        _startColumnIndex = start.Index;
         _grid.DataSource = _rows;
+        _grid.DataBindingComplete += (_, _) => RefreshStartButtons();
     }
 
     private void BuildLayout()
@@ -152,7 +172,7 @@ public sealed class MainForm : Form
             RowCount = 4,
             Padding = new Padding(16, 12, 16, 12)
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 210));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 250));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
@@ -167,13 +187,14 @@ public sealed class MainForm : Form
     private GroupBox BuildContextCard()
     {
         var group = new GroupBox { Text = "AWS context", Dock = DockStyle.Fill, Padding = new Padding(10, 10, 10, 10) };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 4 };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 5 };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
 
         grid.Controls.Add(Lbl("Folder"), 0, 0);
@@ -191,22 +212,27 @@ public sealed class MainForm : Form
         grid.Controls.Add(_profiles, 1, 2);
         grid.Controls.Add(_reload, 2, 2);
 
-        var authRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-        authRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        authRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var authLeft = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
+        var authMeta = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true };
         _authLabel.Margin = new Padding(0, 8, 12, 0);
         _regionLabel.Margin = new Padding(0, 8, 16, 0);
         _targetLabel.Margin = new Padding(0, 8, 12, 0);
         _remember.Margin = new Padding(0, 6, 0, 0);
-        authLeft.Controls.AddRange([_authLabel, _regionLabel, _targetLabel, _remember]);
-        var authButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+        authMeta.Controls.AddRange([_authLabel, _regionLabel, _targetLabel, _remember]);
+        grid.Controls.Add(authMeta, 1, 3);
+        grid.SetColumnSpan(authMeta, 2);
+
+        var authButtons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            Padding = new Padding(0, 4, 0, 0)
+        };
         _signIn.Margin = new Padding(0, 0, 8, 0);
+        _deviceCode.Margin = new Padding(0, 0, 0, 0);
         authButtons.Controls.AddRange([_signIn, _deviceCode]);
-        authRow.Controls.Add(authLeft, 0, 0);
-        authRow.Controls.Add(authButtons, 1, 0);
-        grid.Controls.Add(authRow, 1, 3);
-        grid.SetColumnSpan(authRow, 2);
+        grid.Controls.Add(authButtons, 1, 4);
+        grid.SetColumnSpan(authButtons, 2);
 
         group.Controls.Add(grid);
         return group;
@@ -289,7 +315,12 @@ public sealed class MainForm : Form
         _connect.Click += async (_, _) => await ConnectEnabledAsync();
         _stopAll.Click += async (_, _) => await RunBusy(() => _orchestrator.StopAllAsync(_cts.Token), "Stopping tunnels…");
         _retryFailed.Click += async (_, _) => await RetryFailedAsync();
-        _remember.CheckedChanged += async (_, _) => { _settings.RememberConnections = _remember.Checked; await PersistAsync(); };
+        _remember.CheckedChanged += async (_, _) =>
+        {
+            if (_suppressSettingsEvents) return;
+            _settings.RememberConnections = _remember.Checked;
+            await PersistAsync();
+        };
         _folderBox.Leave += async (_, _) =>
         {
             if (!_startupComplete) return;
@@ -351,6 +382,7 @@ public sealed class MainForm : Form
             UpdateDestinationReadOnly(e.RowIndex);
             row.RefreshValidation();
             UpdateSummaryAndConnect();
+            RefreshStartButtons();
             _ = PersistAsync();
             return;
         }
@@ -359,6 +391,7 @@ public sealed class MainForm : Form
         {
             row.RefreshValidation();
             UpdateSummaryAndConnect();
+            RefreshStartButtons();
             _ = PersistAsync();
         }
     }
@@ -378,7 +411,9 @@ public sealed class MainForm : Form
         }
 
         row.RefreshValidation();
+        PreserveActiveSessionStatus(row);
         UpdateSummaryAndConnect();
+        RefreshStartButtons();
         _ = PersistAsync();
     }
 
@@ -399,8 +434,8 @@ public sealed class MainForm : Form
 
     private void UpdateDestinationReadOnly(int rowIndex)
     {
-        if (rowIndex < 0 || rowIndex >= _rows.Count) return;
-        var cell = _grid.Rows[rowIndex].Cells[2];
+        if (rowIndex < 0 || rowIndex >= _rows.Count || _destinationColumnIndex < 0) return;
+        var cell = _grid.Rows[rowIndex].Cells[_destinationColumnIndex];
         var managed = _rows[rowIndex].Type == PortForwardType.ManagedNode;
         cell.ReadOnly = managed;
         cell.Style.BackColor = managed ? Color.FromArgb(245, 245, 245) : SystemColors.Window;
@@ -410,14 +445,18 @@ public sealed class MainForm : Form
     {
         if (e.RowIndex < 0 || e.RowIndex >= _rows.Count) return;
         var row = _rows[e.RowIndex];
-        var header = _grid.Columns[e.ColumnIndex].HeaderText;
-        var text = (_grid.Columns[e.ColumnIndex] as DataGridViewButtonColumn)?.Text;
+        var column = _grid.Columns[e.ColumnIndex];
+        var text = (column as DataGridViewButtonColumn)?.Text;
+        var cellValue = _grid.Rows[e.RowIndex].Cells[e.ColumnIndex].Value?.ToString();
 
-        if (text == "Start")
+        if (e.ColumnIndex == _startColumnIndex || text == "Start" || cellValue == "Start")
+        {
+            if (!CanStartRow(row)) return;
             await StartSingleAsync(row);
-        else if (text == "Stop")
+        }
+        else if (text == "Stop" || cellValue == "Stop")
             await RunBusy(() => _orchestrator.StopAsync(row.Id, _cts.Token), "Stopping…");
-        else if (text == "Delete")
+        else if (text == "Delete" || cellValue == "Delete")
             await DeleteRowAsync(row);
     }
 
@@ -427,6 +466,7 @@ public sealed class MainForm : Form
         _rows.Add(row);
         UpdateDestinationReadOnly(_rows.Count - 1);
         UpdateSummaryAndConnect();
+        RefreshStartButtons();
         _ = PersistAsync();
     }
 
@@ -442,6 +482,7 @@ public sealed class MainForm : Form
         }
         _rows.Remove(row);
         UpdateSummaryAndConnect();
+        RefreshStartButtons();
         await PersistAsync();
     }
 
@@ -451,8 +492,11 @@ public sealed class MainForm : Form
         {
             SetBusy(true, "Checking prerequisites…");
             _settings = await _settingsStore.LoadAsync(_cts.Token);
-            _remember.Checked = _settings.RememberConnections;
+            // Load rows before binding the Remember checkbox — CheckedChanged would Persist empty rows and wipe settings.
             LoadSavedConnections();
+            _suppressSettingsEvents = true;
+            try { _remember.Checked = _settings.RememberConnections; }
+            finally { _suppressSettingsEvents = false; }
 
             _prereqs = await _aws.DetectPrerequisitesAsync(_cts.Token);
             _prereqStatus.Text = $"AWS CLI {(_prereqs.AwsCliReady ? "✓" : "✗")}   SSM {(_prereqs.SessionManagerReady ? "✓" : "✗")}";
@@ -505,6 +549,7 @@ public sealed class MainForm : Form
         for (var i = 0; i < _rows.Count; i++)
             UpdateDestinationReadOnly(i);
         UpdateSummaryAndConnect();
+        RefreshStartButtons();
     }
 
     private async Task BrowseFolderAsync()
@@ -844,6 +889,7 @@ public sealed class MainForm : Form
         }
         _grid.Refresh();
         UpdateSummaryAndConnect();
+        RefreshStartButtons();
     }
 
     private void UpdateSummaryAndConnect()
@@ -858,6 +904,47 @@ public sealed class MainForm : Form
 
         var allValid = enabled.Count > 0 && incomplete == 0;
         _connect.Enabled = _busyCount == 0 && CanConnect() && allValid;
+        RefreshStartButtons();
+    }
+
+    private void PreserveActiveSessionStatus(ConnectionRow row)
+    {
+        var session = _orchestrator.GetSession(row.Id);
+        if (session is null) return;
+        row.StatusText = session.State switch
+        {
+            SessionState.Reconnecting => $"Reconnecting {session.RetryAttempt}/{session.MaxRetries}",
+            _ => session.State.ToString()
+        };
+        if (!string.IsNullOrWhiteSpace(session.LastError) &&
+            session.State is SessionState.Failed or SessionState.Reconnecting)
+            row.StatusText = $"{session.State}: {session.LastError}";
+    }
+
+    private bool IsSessionActive(ConnectionRow row)
+    {
+        var session = _orchestrator.GetSession(row.Id);
+        return session?.State is SessionState.Connected or SessionState.Connecting
+            or SessionState.Reconnecting or SessionState.Stopping;
+    }
+
+    private bool CanStartRow(ConnectionRow row)
+    {
+        if (_busyCount > 0 || !CanConnect()) return false;
+        if (IsSessionActive(row)) return false;
+        return PortForwardRuleValidator.Validate(row.ToRule()).IsValid;
+    }
+
+    private void RefreshStartButtons()
+    {
+        if (_startColumnIndex < 0 || _grid.Rows.Count == 0) return;
+        for (var i = 0; i < _rows.Count && i < _grid.Rows.Count; i++)
+        {
+            var canStart = CanStartRow(_rows[i]);
+            var cell = _grid.Rows[i].Cells[_startColumnIndex];
+            // Empty value greys out / blocks the button look; clicks are also guarded in CanStartRow.
+            cell.Value = canStart ? "Start" : "";
+        }
     }
 
     private void ClearAuthTarget()
@@ -995,6 +1082,7 @@ public sealed class MainForm : Form
 public sealed class ConnectionRow : INotifyPropertyChanged
 {
     private bool _enabled = true;
+    private string _name = "";
     private string _typeDisplay = "Managed node";
     private string _destination = "Bastion (same target)";
     private string _remotePortText = "";
@@ -1008,6 +1096,17 @@ public sealed class ConnectionRow : INotifyPropertyChanged
     {
         get => _enabled;
         set { _enabled = value; OnChanged(nameof(Enabled)); RefreshValidation(); }
+    }
+
+    public string Name
+    {
+        get => _name;
+        set
+        {
+            if (_name == value) return;
+            _name = value;
+            OnChanged(nameof(Name));
+        }
     }
 
     public string TypeDisplay
@@ -1085,6 +1184,7 @@ public sealed class ConnectionRow : INotifyPropertyChanged
             LocalPortLinked = false
         };
         row._enabled = rule.Enabled;
+        row._name = rule.Label ?? "";
         row._typeDisplay = rule.Type == PortForwardType.RemoteHost ? "Remote host" : "Managed node";
         row._destination = rule.Type == PortForwardType.RemoteHost
             ? (rule.RemoteHost ?? "")
@@ -1099,13 +1199,15 @@ public sealed class ConnectionRow : INotifyPropertyChanged
     {
         int? remote = int.TryParse(RemotePortText, out var r) ? r : null;
         int? local = int.TryParse(LocalPortText, out var l) ? l : null;
+        var label = string.IsNullOrWhiteSpace(Name) ? null : Name.Trim();
         return new PortForwardRule(
             Id,
             Enabled,
             Type,
             Type == PortForwardType.RemoteHost ? Destination.Trim() : null,
             remote,
-            local);
+            local,
+            label);
     }
 
     public void SetDestinationWithoutNotify(string value) => _destination = value;
